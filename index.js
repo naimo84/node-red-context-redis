@@ -54,6 +54,7 @@ const log = process.env.NODE_RED_HOME ?
     require(require.resolve('@node-red/util', { paths: [process.env.NODE_RED_HOME] })).log :
     require('@node-red/util').log;
 
+const { promisify } = require("util");
 const safeJSONStringify = require('json-stringify-safe');
 
 // This lua script sets a nested property to JSON atomically
@@ -180,7 +181,7 @@ function Redis(config) {
                 // End reconnecting on a specific error and flush all commands with
                 // a individual error
                 return new Error('The server cannot be found');
-            }            
+            }
             if (options.error && options.error.code === 'ECONNREFUSED') {
                 // End reconnecting on a specific error and flush all commands with
                 // a individual error
@@ -246,8 +247,8 @@ Redis.prototype.close = function () {
     });
 };
 
-Redis.prototype.get = function (scope, key, callback) {
-    if (typeof callback !== 'function') {
+Redis.prototype.get = async function (scope, key, callback) {
+    if (callback && typeof callback !== 'function') {
         throw new Error('Callback must be a function');
     }
     try {
@@ -258,35 +259,37 @@ Redis.prototype.get = function (scope, key, callback) {
         // Filter duplicate keys in order to reduce response data
         const rootKeys = key.map(key => util.normalisePropertyExpression(key)[0]).filter((key, index, self) => self.indexOf(key) === index);
         rootKeys.forEach(key => mgetArgs.push(addPrefix(this.prefix, scope, key)));
-        this.client.MGET(...mgetArgs, (err, replies) => {
-            if (err) {
-                callback(err);
-            } else {
-                let results = [];
-                let data = {};
-                let value;
-                for (let i = 0; i < rootKeys.length; i++) {
-                    try {
-                        if (replies[i]) {
-                            data[rootKeys[i]] = JSON.parse(replies[i]);
-                        }
-                    } catch (err) {
-                        // If data is not JSON, return `undefined`
-                        break;
+        const getAsync = promisify(this.client.mget).bind(this.client);
+        return getAsync(...mgetArgs).then(replies => {
+            let results = [];
+            let data = {};
+            let value;
+            for (let i = 0; i < rootKeys.length; i++) {
+                try {
+                    if (replies[i]) {
+                        data[rootKeys[i]] = JSON.parse(replies[i]);
                     }
+                } catch (err) {
+                    break;
                 }
-                for (let i = 0; i < key.length; i++) {
-                    try {
-                        value = util.getObjectProperty(data, key[i]);
-                    } catch (err) {
-                        if (err.code === 'INVALID_EXPR') {
-                            throw err;
-                        }
-                        value = undefined;
+            }
+            for (let i = 0; i < key.length; i++) {
+                try {
+                    value = util.getObjectProperty(data, key[i]);
+                } catch (err) {
+                    if (err.code === 'INVALID_EXPR') {
+                        throw err;
                     }
-                    results.push(value);
+                    value = undefined;
                 }
+                results.push(value);
+            }
+            if (callback)
                 callback(null, ...results);
+            else {
+                if (results.length >= 1) {
+                    return results[0];
+                } else { return undefined; }
             }
         });
     } catch (err) {
@@ -422,7 +425,7 @@ Redis.prototype.clean = function (_activeNodes) {
     this.knownCircularRefs = {};
 
     const prefix = this.prefix;
-    if(!prefix){
+    if (!prefix) {
         return Promise.resolve();
     }
 
@@ -432,11 +435,11 @@ Redis.prototype.clean = function (_activeNodes) {
                 reject(err);
             } else {
                 //if(this.options.prefix){
-                    //res = res.map(key => key.substring(prefix.length))
+                //res = res.map(key => key.substring(prefix.length))
                 //}
-                res = res.filter(key => !key.startsWith( prefix + ":global"))
+                res = res.filter(key => !key.startsWith(prefix + ":global"))
                 _activeNodes.forEach(scope => {
-                    res = res.filter(key => !key.startsWith( prefix + ':' + scope))
+                    res = res.filter(key => !key.startsWith(prefix + ':' + scope))
                 })
                 if (res.length > 0) {
                     this.client.DEL(...res, (err) => {
